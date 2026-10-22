@@ -1,290 +1,227 @@
+
 (() => {
-  "use strict";
-  const $ = (id) => document.getElementById(id);
-  const KEYS = { sessions: "devspace.sessions.v1", notes: "devspace.notes.v1" };
-  const ACTIVITIES = ["DSA / Coding", "College studies", "Project work", "Data Science / ML", "Break / Personal"];
-  let sessions = loadJSON(KEYS.sessions, []);
-  let current = null;
-  let tickHandle = null;
-  let toastHandle = null;
-  let focusRemaining = 25 * 60;
-  let focusRunning = false;
-  let focusHandle = null;
-  let deferredInstallPrompt = null;
+const $ = id => document.getElementById(id);
+const KEY = "devspace.tasks.v4";
+const NOTEKEY = "devspace.notes.v4";
+const categories = ["Academics","DSA","Data Science","Project"];
+let tasks = load(KEY,[]);
+let showDone = false, remaining = 1500, running = false, endAt = 0, timer = null;
 
-  function loadJSON(key, fallback) {
-    try { const value = localStorage.getItem(key); return value ? JSON.parse(value) : fallback; }
-    catch { return fallback; }
-  }
-  function saveSessions() {
-    try { localStorage.setItem(KEYS.sessions, JSON.stringify(sessions)); return true; }
-    catch { showToast("Couldn't save. Export your history and check browser storage."); return false; }
-  }
-  function dateKey(date) {
-    const d = new Date(date);
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  }
-  function fmtDuration(seconds, short = false) {
-    seconds = Math.max(0, Math.floor(seconds || 0));
-    const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
-    if (short) return h ? `${h}h ${m}m` : m ? `${m}m` : `${s}s`;
-    return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-  }
-  function humanTime(iso) {
-    return new Date(iso).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
-  }
-  function showToast(message) {
-    const el = $("toast");
-    el.textContent = message;
-    el.classList.add("show");
-    clearTimeout(toastHandle);
-    toastHandle = setTimeout(() => el.classList.remove("show"), 2500);
-  }
-  function updateClock() {
-    const now = new Date();
-    $("clock").textContent = now.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    $("clockDate").textContent = now.toLocaleDateString([], {weekday:"long", month:"short", day:"numeric"});
-    $("dateLabel").textContent = now.toLocaleDateString([], {weekday:"long"}).toUpperCase() + " · YOUR DAY, AT A GLANCE";
-    $("todayLabel").textContent = now.toLocaleDateString([], {month:"short", day:"numeric"});
-    const hour = now.getHours();
-    $("greeting").textContent = hour < 12 ? "Good morning. Start with one thing." : hour < 17 ? "Make room for focused work." : "A little progress still counts.";
-  }
-  function sessionSeconds(s) { return Math.max(0, Number(s.durationSeconds) || 0); }
-  function todaySessions() { const today = dateKey(new Date()); return sessions.filter(s => dateKey(s.startedAt) === today); }
-  function refreshSummary() {
-    const today = todaySessions();
-    const total = today.reduce((sum, s) => sum + sessionSeconds(s), 0);
-    $("todayTotal").textContent = fmtDuration(total, true);
-    $("todaySessions").textContent = String(today.length);
-    const totals = ACTIVITIES.map(name => ({name, seconds: today.filter(s => s.activity === name).reduce((sum,s) => sum + sessionSeconds(s),0)})).filter(x => x.seconds > 0).sort((a,b) => b.seconds-a.seconds);
-    const container = $("activityBreakdown");
-    if (!totals.length) {
-      container.innerHTML = '<p class="empty-state">Your activity breakdown will appear here after your first session.</p>';
-      return;
-    }
-    container.innerHTML = "";
-    totals.forEach(item => {
-      const row = document.createElement("div"); row.className = "breakdown-row";
-      const label = document.createElement("div"); label.className = "breakdown-label";
-      const name = document.createElement("span"); name.textContent = item.name;
-      const duration = document.createElement("span"); duration.textContent = fmtDuration(item.seconds, true);
-      label.append(name, duration);
-      const track = document.createElement("div"); track.className = "bar-track";
-      const bar = document.createElement("span"); bar.style.width = `${Math.min(100, total ? item.seconds/total*100 : 0)}%`;
-      track.append(bar); row.append(label,track); container.append(row);
-    });
-  }
-  function makeHistoryItem(s) {
-    const row = document.createElement("div"); row.className = "history-item";
-    const dot = document.createElement("span"); dot.className = "history-dot";
-    const copy = document.createElement("div");
-    const title = document.createElement("strong"); title.textContent = s.task ? `${s.activity} · ${s.task}` : s.activity;
-    const meta = document.createElement("small"); meta.textContent = `${humanTime(s.startedAt)} – ${humanTime(s.endedAt)}${s.pausedSeconds ? ` · ${fmtDuration(s.pausedSeconds,true)} paused` : ""}`;
-    copy.append(title,meta);
-    const duration = document.createElement("span"); duration.className = "history-duration"; duration.textContent = fmtDuration(sessionSeconds(s),true);
-    row.append(dot,copy,duration); return row;
-  }
-  function refreshRecent() {
-    const el = $("recentHistory"); el.innerHTML = "";
-    const recent = [...sessions].sort((a,b) => new Date(b.startedAt)-new Date(a.startedAt)).slice(0,4);
-    if (!recent.length) { el.innerHTML = '<p class="empty-state">Finished sessions will show up here.</p>'; return; }
-    recent.forEach(s => el.append(makeHistoryItem(s)));
-  }
-  function refreshAll() { refreshSummary(); refreshRecent(); }
-  function updateSessionTimer() {
-    if (!current) { $("sessionTimer").textContent = "00:00:00"; return; }
-    const seconds = current.elapsedSeconds + (current.running ? Math.floor((Date.now()-current.segmentStartedAt)/1000) : 0);
-    $("sessionTimer").textContent = fmtDuration(seconds);
-  }
-  function setSessionUI(state) {
-    const status = $("sessionStatus");
-    status.classList.toggle("running", state === "running");
-    status.innerHTML = state === "running" ? "<span></span> Tracking" : state === "paused" ? "<span></span> Paused" : "<span></span> Ready";
-    $("startBtn").disabled = state === "running";
-    $("pauseBtn").disabled = !current || state !== "running";
-    $("finishBtn").disabled = !current;
-    $("activitySelect").disabled = !!current;
-    $("taskInput").disabled = !!current;
-    $("sessionHint").textContent = state === "running" ? "Timer is running. Stay with your task." : state === "paused" ? "Paused. Resume when you're ready." : "Ready when you are.";
-  }
-  function startSession() {
-    if (current && !current.running) {
-      const resumedAt = Date.now();
-      if (current.lastPausedAt) {
-        current.pausedSeconds += Math.floor((resumedAt - current.lastPausedAt) / 1000);
-        current.lastPausedAt = null;
-      }
-      current.running = true; current.segmentStartedAt = resumedAt;
-      setSessionUI("running"); showToast("Session resumed."); return;
-    }
-    if (current) return;
-    current = {
-      id: (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`),
-      activity: $("activitySelect").value,
-      task: $("taskInput").value.trim(),
-      startedAt: new Date().toISOString(),
-      segmentStartedAt: Date.now(),
-      elapsedSeconds: 0,
-      pausedSeconds: 0,
-      running: true,
-      lastPausedAt: null
-    };
-    setSessionUI("running");
-    if (tickHandle) clearInterval(tickHandle);
-    tickHandle = setInterval(updateSessionTimer, 500);
-    updateSessionTimer();
-  }
-  function pauseSession() {
-    if (!current || !current.running) return;
-    const now = Date.now();
-    current.elapsedSeconds += Math.floor((now-current.segmentStartedAt)/1000);
-    current.running = false; current.lastPausedAt = now;
-    updateSessionTimer(); setSessionUI("paused");
-  }
-  function finishSession() {
-    if (!current) return;
-    const now = Date.now();
-    if (current.running) current.elapsedSeconds += Math.floor((now-current.segmentStartedAt)/1000);
-    if (current.lastPausedAt) {
-      current.pausedSeconds += Math.floor((now-current.lastPausedAt)/1000);
-      current.lastPausedAt = null;
-    }
-    current.running = false;
-    const record = {
-      id: current.id, activity: current.activity, task: current.task,
-      startedAt: current.startedAt, endedAt: new Date(now).toISOString(),
-      durationSeconds: Math.max(0,current.elapsedSeconds), pausedSeconds: Math.max(0,current.pausedSeconds)
-    };
-    if (record.durationSeconds < 1) {
-      showToast("That session was under a second, so it wasn't saved.");
-    } else {
-      sessions.push(record);
-      saveSessions();
-      showToast(`Saved session · ${fmtDuration(record.durationSeconds,true)}`);
-    }
-    current = null;
-    if (tickHandle) clearInterval(tickHandle);
-    tickHandle = null;
-    updateSessionTimer(); setSessionUI("ready"); refreshAll();
-    $("taskInput").value = "";
-  }
-  function renderFullHistory(filterDate = "") {
-    const el = $("fullHistory"); el.innerHTML = "";
-    const sorted = [...sessions].sort((a,b) => new Date(b.startedAt)-new Date(a.startedAt));
-    const filtered = filterDate ? sorted.filter(s => dateKey(s.startedAt) === filterDate) : sorted;
-    if (!filtered.length) { el.innerHTML = '<p class="empty-state">No saved sessions for this date yet.</p>'; return; }
-    let lastDay = "";
-    filtered.forEach(s => {
-      const day = dateKey(s.startedAt);
-      if (day !== lastDay) {
-        const heading = document.createElement("div"); heading.className = "history-day-heading";
-        heading.textContent = day === dateKey(new Date()) ? "TODAY" : new Date(s.startedAt).toLocaleDateString([], {weekday:"short",month:"short",day:"numeric",year:"numeric"}).toUpperCase();
-        el.append(heading); lastDay = day;
-      }
-      const row = document.createElement("div"); row.className = "history-detail";
-      const copy = document.createElement("div");
-      const title = document.createElement("strong"); title.textContent = s.task ? `${s.activity} · ${s.task}` : s.activity;
-      const meta = document.createElement("small"); meta.textContent = `${humanTime(s.startedAt)} – ${humanTime(s.endedAt)}`;
-      copy.append(title,meta);
-      const duration = document.createElement("span"); duration.className = "duration"; duration.textContent = fmtDuration(sessionSeconds(s),true);
-      row.append(copy,duration); el.append(row);
-    });
-  }
-  function openHistory() {
-    $("historyDate").value = dateKey(new Date());
-    renderFullHistory($("historyDate").value);
-    $("historyDialog").showModal();
-  }
-  function exportHistory() {
-    const data = {format:"DevSpace backup", version:1, exportedAt:new Date().toISOString(), sessions, notes:$("notes").value};
-    const blob = new Blob([JSON.stringify(data,null,2)], {type:"application/json"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `devspace-backup-${dateKey(new Date())}.json`;
-    document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    showToast("Backup exported.");
-  }
-  async function importHistory(file) {
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (!data || !Array.isArray(data.sessions)) throw new Error("Invalid backup");
-      const valid = data.sessions.filter(s => s && typeof s.activity === "string" && typeof s.startedAt === "string" && typeof s.endedAt === "string" && Number.isFinite(Number(s.durationSeconds)) && !Number.isNaN(new Date(s.startedAt).getTime()) && !Number.isNaN(new Date(s.endedAt).getTime()));
-      const map = new Map(sessions.map(s => [s.id || `${s.startedAt}|${s.activity}|${s.durationSeconds}`,s]));
-      valid.forEach(s => map.set(s.id || `${s.startedAt}|${s.activity}|${s.durationSeconds}`, {...s,durationSeconds:Math.max(0,Number(s.durationSeconds))}));
-      sessions = [...map.values()].sort((a,b) => new Date(a.startedAt)-new Date(b.startedAt));
-      saveSessions();
-      if (typeof data.notes === "string" && !$("notes").value.trim()) { $("notes").value=data.notes; localStorage.setItem(KEYS.notes,data.notes); }
-      refreshAll(); renderFullHistory($("historyDate").value);
-      showToast(`Imported ${valid.length} session(s).`);
-    } catch { showToast("That file doesn't look like a DevSpace backup."); }
-    finally { $("importInput").value = ""; }
-  }
-  function startFocus() {
-    if (focusRunning) {
-      focusRunning = false; clearInterval(focusHandle); focusHandle = null; $("focusStart").textContent = "Resume focus"; return;
-    }
-    if (focusRemaining <= 0) focusRemaining = 25*60;
-    focusRunning = true; $("focusStart").textContent = "Pause focus";
-    focusHandle = setInterval(() => {
-      focusRemaining = Math.max(0,focusRemaining-1);
-      updateFocus();
-      if (focusRemaining === 0) {
-        clearInterval(focusHandle); focusHandle = null; focusRunning = false;
-        $("focusStart").textContent = "Start again"; $("focusHint").textContent = "25 minutes complete. Take a break if you need one.";
-        showToast("Focus timer complete.");
-      }
-    },1000);
-  }
-  function updateFocus() {
-    const m = Math.floor(focusRemaining/60), s = focusRemaining%60;
-    $("focusDisplay").textContent = `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-    $("focusProgress").style.width = `${(1-focusRemaining/(25*60))*100}%`;
-  }
-  function resetFocus() {
-    clearInterval(focusHandle); focusHandle = null; focusRunning = false; focusRemaining = 25*60;
-    $("focusStart").textContent = "Start focus"; $("focusHint").textContent = "Use this if it helps. No streaks or scores."; updateFocus();
-  }
-
-  $("startBtn").addEventListener("click", startSession);
-  $("pauseBtn").addEventListener("click", pauseSession);
-  $("finishBtn").addEventListener("click", finishSession);
-  $("notes").value = loadJSON(KEYS.notes, "");
-  $("notes").addEventListener("input", () => {
-    try { localStorage.setItem(KEYS.notes, JSON.stringify($("notes").value)); $("notesSaved").textContent = "Saved on this device"; }
-    catch { $("notesSaved").textContent = "Couldn't save"; }
+function load(k,fallback) {
+  try { return JSON.parse(localStorage.getItem(k)) ?? fallback; }
+  catch { return fallback; }
+}
+function save() {
+  try { localStorage.setItem(KEY,JSON.stringify(tasks)); }
+  catch { toast("Storage full. Export a backup."); }
+}
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function dateText(v) {
+  if(!v) return "";
+  const [y,m,d] = v.split("-").map(Number);
+  return new Date(y,m-1,d).toLocaleDateString([],{month:"short",day:"numeric"});
+}
+function timeText(v) {
+  if(!v) return "";
+  const [h,m] = v.split(":").map(Number);
+  return new Date(2000,0,1,h,m).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+}
+function toast(msg) {
+  const el=$("toast"); el.textContent=msg; el.classList.add("show");
+  setTimeout(()=>el.classList.remove("show"),2200);
+}
+function clock() {
+  const d=new Date(), h=d.getHours();
+  $("clock").textContent=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+  $("clockDate").textContent=d.toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"});
+  $("dayLabel").textContent=d.toLocaleDateString([],{weekday:"long"}).toUpperCase()+" · YOUR DAY";
+}
+function todayTasks(){return tasks.filter(t=>t.date===today());}
+function elapsed(t) {
+  if(!t.startedAt)return 0;
+  return Math.max(0,Math.floor(((t.completedAt?new Date(t.completedAt):new Date())-new Date(t.startedAt))/1000));
+}
+function duration(seconds) {
+  const mins=Math.floor(Math.max(0,seconds)/60);
+  const hours=Math.floor(mins/60);
+  return hours?`${hours}h ${mins%60}m`:`${mins}m`;
+}
+function node(tag,cls,text) {
+  const e=document.createElement(tag);
+  if(cls)e.className=cls;
+  if(text!==undefined)e.textContent=text;
+  return e;
+}
+function summary() {
+  const list=todayTasks(), done=list.filter(t=>t.completed);
+  const percent=list.length?Math.round(done.length/list.length*100):0;
+  $("doneCount").textContent=`${done.length} / ${list.length}`;
+  $("timeTotal").textContent=duration(done.reduce((n,t)=>n+elapsed(t),0));
+  $("percent").textContent=percent+"%";
+  $("bar").style.width=percent+"%";
+}
+function render() {
+  const list=$("tasks"); list.replaceChildren();
+  const filter=$("filter").value;
+  const items=todayTasks()
+    .filter(t=>filter==="All"||t.category===filter)
+    .filter(t=>showDone||!t.completed)
+    .sort((a,b)=>Number(a.completed)-Number(b.completed)||(a.plannedStart||"99:99").localeCompare(b.plannedStart||"99:99"));
+  if(!items.length) list.append(node("p","muted","No tasks here yet. Add one above."));
+  items.forEach(t=>{
+    const row=node("div","task"+(t.completed?" done":""));
+    const check=node("input","check"); check.type="checkbox"; check.checked=t.completed;
+    check.onchange=()=>complete(t.id,check.checked);
+    const copy=node("div");
+    copy.append(node("div","tasktitle",t.title));
+    const meta=node("div","meta",t.category+
+      ((t.plannedStart||t.plannedEnd)?` · Planned ${t.plannedStart?timeText(t.plannedStart):"—"}–${t.plannedEnd?timeText(t.plannedEnd):"—"}`:"")+
+      (t.completedAt?` · Done ${new Date(t.completedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`:""));
+    const actions=node("div","taskactions");
+    const start=node("button","mini",t.startedAt?"Restart time":"Start time");
+    start.onclick=()=>startTask(t.id);
+    const edit=node("button","mini","Edit");
+    edit.onclick=()=>editTask(t.id);
+    const del=node("button","mini delete","Delete");
+    del.onclick=()=>deleteTask(t.id);
+    actions.append(start,edit,del); copy.append(meta,actions);
+    const times=node("div","tasktimes",t.startedAt?"Start "+new Date(t.startedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):"Not started");
+    times.append(node("small","",t.completedAt?"End "+new Date(t.completedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):""));
+    row.append(check,copy,times); list.append(row);
   });
-  // Notes are stored as JSON for safe consistent parsing.
+  $("showDone").textContent=showDone?"Hide completed":"Show completed";
+  summary(); fillTimerTasks(); recent();
+}
+function fillTimerTasks() {
+  const s=$("timerTask"), old=s.value;
+  s.replaceChildren(node("option","","No task selected")); s.options[0].value="";
+  todayTasks().filter(t=>!t.completed).forEach(t=>{
+    const o=node("option","",t.category+": "+t.title);o.value=t.id;s.append(o);
+  });
+  if([...s.options].some(o=>o.value===old))s.value=old;
+}
+function addTask(e) {
+  e.preventDefault();
+  const title=$("title").value.trim(), start=$("plannedStart").value, end=$("plannedEnd").value;
+  if(!title)return;
+  if(start&&end&&end<start)return toast("End time must follow start time.");
+  tasks.push({id:crypto.randomUUID?crypto.randomUUID():String(Date.now()),title,
+    category:$("category").value,date:$("date").value||today(),
+    plannedStart:start,plannedEnd:end,completed:false,createdAt:Date.now(),
+    startedAt:null,completedAt:null});
+  save();$("title").value="";$("plannedStart").value="";$("plannedEnd").value="";
+  $("date").value=today();render();toast("Task added.");
+}
+function complete(id,checked) {
+  const t=tasks.find(x=>x.id===id);if(!t)return;
+  t.completed=checked;
+  if(checked){t.completedAt=new Date().toISOString();if(!t.startedAt)t.startedAt=t.completedAt;}
+  else t.completedAt=null;
+  save();render();toast(checked?"Completed and saved.":"Task reopened.");
+}
+function startTask(id) {
+  const t=tasks.find(x=>x.id===id);if(!t)return;
+  if(t.startedAt&&!confirm("Restart the recorded start time?"))return;
+  t.startedAt=new Date().toISOString();t.completedAt=null;t.completed=false;
+  save();render();toast("Start time recorded.");
+}
+function editTask(id) {
+  const t=tasks.find(x=>x.id===id);if(!t)return;
+  const name=prompt("Task name:",t.title);
+  if(name===null||!name.trim())return;
+  const cat=prompt("Category: Academics, DSA, Data Science, Project",t.category);
+  t.title=name.trim();
+  if(cat!==null){const match=categories.find(c=>c.toLowerCase()===cat.trim().toLowerCase());if(match)t.category=match;}
+  save();render();toast("Task updated.");
+}
+function deleteTask(id) {
+  const t=tasks.find(x=>x.id===id);
+  if(t&&confirm(`Delete "${t.title}"?`)){tasks=tasks.filter(x=>x.id!==id);save();render();toast("Task deleted.");}
+}
+function recent() {
+  const box=$("recent");box.replaceChildren();
+  const done=[...tasks].filter(t=>t.completed).sort((a,b)=>b.completedAt.localeCompare(a.completedAt)).slice(0,4);
+  if(!done.length){box.textContent="Nothing completed yet.";return;}
+  done.forEach(t=>box.append(node("p","",`✓ ${t.title} · ${t.category} · ${dateText(t.date)}`)));
+}
+function history(filter="") {
+  const box=$("historyList");box.replaceChildren();
+  let list=[...tasks].sort((a,b)=>b.date.localeCompare(a.date)||b.createdAt-a.createdAt);
+  if(filter)list=list.filter(t=>t.date===filter);
+  if(!list.length){box.textContent="No tasks saved for this date.";return;}
+  let day="";
+  list.forEach(t=>{
+    if(t.date!==day){box.append(node("div","historyday",dateText(t.date).toUpperCase()));day=t.date;}
+    const row=node("div","historyitem");
+    const copy=node("div");
+    copy.append(node("b","",(t.completed?"✓ ":"")+t.title),
+      node("small","",`${t.category} · ${t.plannedStart?timeText(t.plannedStart):"No planned start"}${t.plannedEnd?"–"+timeText(t.plannedEnd):""}`+
+      (t.completedAt?" · Completed "+new Date(t.completedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):"")));
+    row.append(copy,node("span","",t.completed?"Done":"Pending"));box.append(row);
+  });
+}
+function openHistory(){$("historyDate").value="";history();$("history").showModal();}
+function exportData() {
+  const data={format:"DevSpace backup",version:4,exportedAt:new Date().toISOString(),tasks,notes:$("notes").value};
+  const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+  const a=node("a");a.href=url;a.download=`devspace-backup-${today()}.json`;a.click();URL.revokeObjectURL(url);toast("Backup exported.");
+}
+async function importData(file) {
+  if(!file)return;
   try {
-    const raw = localStorage.getItem(KEYS.notes);
-    if (raw) { const parsed = JSON.parse(raw); if (typeof parsed === "string") $("notes").value = parsed; }
-  } catch {}
-  $("viewHistoryBtn").addEventListener("click", openHistory);
-  $("closeHistory").addEventListener("click", () => $("historyDialog").close());
-  $("historyDate").addEventListener("change", () => renderFullHistory($("historyDate").value));
-  $("allDatesBtn").addEventListener("click", () => { $("historyDate").value = ""; renderFullHistory(); });
-  $("exportBtn").addEventListener("click", exportHistory);
-  $("dialogExportBtn").addEventListener("click", exportHistory);
-  $("importInput").addEventListener("change", (e) => importHistory(e.target.files[0]));
-  $("clearHistoryBtn").addEventListener("click", () => {
-    if (!sessions.length) { showToast("There is no history to clear."); return; }
-    if (confirm("Delete all saved sessions from this browser? This cannot be undone unless you exported a backup.")) {
-      sessions = []; saveSessions(); refreshAll(); renderFullHistory($("historyDate").value); showToast("Session history cleared.");
-    }
-  });
-  $("focusStart").addEventListener("click", startFocus);
-  $("focusReset").addEventListener("click", resetFocus);
+    const data=JSON.parse(await file.text());
+    if(!Array.isArray(data.tasks))throw Error();
+    const map=new Map(tasks.map(t=>[t.id,t]));
+    data.tasks.filter(t=>t&&typeof t.title==="string"&&categories.includes(t.category)&&t.date)
+      .forEach(t=>map.set(t.id||String(Date.now()+Math.random()),t));
+    tasks=[...map.values()];save();
+    if(typeof data.notes==="string"&&!$("notes").value.trim()){$("notes").value=data.notes;localStorage.setItem(NOTEKEY,JSON.stringify(data.notes));}
+    render();history($("historyDate").value);toast("Backup imported.");
+  } catch {toast("Invalid DevSpace backup.");}
+  $("import").value="";
+}
+function showTimer() {
+  const s=Math.max(0,remaining),m=Math.floor(s/60),r=s%60;
+  $("timerDisplay").textContent=String(m).padStart(2,"0")+":"+String(r).padStart(2,"0");
+}
+function tick() {
+  remaining=Math.max(0,Math.ceil((endAt-Date.now())/1000));showTimer();
+  if(remaining===0){running=false;clearInterval(timer);timer=null;$("timerStart").disabled=false;$("timerStart").textContent="Start again";$("timerPause").disabled=true;toast("Timer finished. Check your task.");}
+}
+function startTimer() {
+  if(running)return;
+  if(remaining<=0)remaining=Math.max(1,Math.min(240,+$("minutes").value||25))*60;
+  running=true;endAt=Date.now()+remaining*1000;
+  $("timerStart").disabled=true;$("timerPause").disabled=false;tick();timer=setInterval(tick,250);
+}
+function pauseTimer() {
+  if(!running)return;tick();running=false;clearInterval(timer);timer=null;
+  $("timerStart").disabled=false;$("timerStart").textContent="Resume";$("timerPause").disabled=true;
+}
+function resetTimer() {
+  running=false;clearInterval(timer);timer=null;
+  remaining=Math.max(1,Math.min(240,+$("minutes").value||25))*60;
+  $("timerStart").disabled=false;$("timerStart").textContent="Start";
+  $("timerPause").disabled=true;showTimer();
+}
 
-  window.addEventListener("beforeinstallprompt", (e) => {
-    e.preventDefault(); deferredInstallPrompt = e; $("installBtn").hidden = false;
-  });
-  $("installBtn").addEventListener("click", async () => {
-    if (!deferredInstallPrompt) return;
-    deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null; $("installBtn").hidden = true;
-  });
-
-  updateClock(); setInterval(updateClock,1000); refreshAll(); setSessionUI("ready"); updateFocus();
-  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-    window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
-  }
+$("taskForm").addEventListener("submit",addTask);
+$("date").value=today();
+$("filter").onchange=render;
+$("showDone").onclick=()=>{showDone=!showDone;render();};
+$("historyBtn").onclick=openHistory;
+$("closeHistory").onclick=()=>$("history").close();
+$("historyDate").onchange=()=>history($("historyDate").value);
+$("allDates").onclick=()=>{$("historyDate").value="";history();};
+["export","export2","export3"].forEach(id=>$(id).onclick=exportData);
+$("import").onchange=e=>importData(e.target.files[0]);
+$("clear").onclick=()=>{if(confirm("Delete all tasks? Export a backup first if needed.")){tasks=[];save();render();history();toast("History cleared.");}};
+$("notes").value=load(NOTEKEY,"");
+$("notes").oninput=()=>{localStorage.setItem(NOTEKEY,JSON.stringify($("notes").value));$("noteStatus").textContent="Auto-saved";};
+$("minutes").onchange=()=>{if(!running)resetTimer();};
+$("timerStart").onclick=startTimer;$("timerPause").onclick=pauseTimer;$("timerReset").onclick=resetTimer;
+clock();setInterval(clock,1000);render();resetTimer();
 })();
