@@ -1,0 +1,15 @@
+{
+  "id": "./",
+  "name": "DevSpace — Study Workspace",
+  "short_name": "DevSpace",
+  "description": "A calm personal workspace for coding, study sessions, notes, and history.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b100d",
+  "theme_color": "#101713",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
